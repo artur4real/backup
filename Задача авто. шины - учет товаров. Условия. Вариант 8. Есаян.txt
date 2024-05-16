@@ -1,0 +1,163 @@
+CREATE TABLE Поставки (
+    id INT PRIMARY KEY,
+    ДатаПоставки DATE NOT NULL,
+    КодШины INT NOT NULL,
+    Количество INT NOT NULL
+);
+
+CREATE TABLE Шины (
+    id INT PRIMARY KEY,
+    Название NVARCHAR(50) NOT NULL,
+    Марка NVARCHAR(50) NOT NULL,
+    СтранаПроизводитель NVARCHAR(50) NOT NULL,
+    ЦенаЗаединицу DECIMAL(10,2) NOT NULL
+);
+
+CREATE TABLE Продажи (
+    Нпп INT PRIMARY KEY,
+    ДатаПродажи DATE NOT NULL,
+    КодШины INT NOT NULL,
+    Количество INT NOT NULL
+);
+
+
+-- Добавляем данных
+
+INSERT INTO Шины (id, Название, Марка, СтранаПроизводитель, ЦенаЗаединицу) VALUES
+    (1, 'Bridgestone Potenza RE-71R', 'Bridgestone', 'Япония', 200.00),
+    (2, 'Michelin Pilot Sport 4S', 'Michelin', 'Франция', 220.00),
+    (3, 'Continental ExtremeContact Sport', 'Continental', 'Германия', 190.00);
+
+-- Добавляем поставки
+INSERT INTO Поставки (id, ДатаПоставки, КодШины, Количество) VALUES
+    (1, '2023-04-25', 1, 100),
+    (2, '2023-04-26', 2, 50),
+    (3, '2023-05-01', 1, 150);
+
+-- Добавляем продажи
+INSERT INTO Продажи (Нпп, ДатаПродажи, КодШины, Количество) VALUES
+    (1, '2023-04-28', 1, 10),
+    (2, '2023-04-30', 2, 20),
+    (3, '2023-05-01', 1, 15);
+
+
+-- 1)
+CREATE PROCEDURE РасчетНаценкиПоДате @ДатаПоставки DATE
+AS
+BEGIN
+    DECLARE @Наценка DECIMAL(10, 2);
+
+    IF DATENAME(WEEKDAY, @ДатаПоставки) IN ('Saturday', 'Sunday')
+        SET @Наценка = 0.035;
+    ELSE
+        SET @Наценка = 0;
+
+    UPDATE Поставки
+    SET Количество = Количество * (1 + @Наценка)
+    WHERE ДатаПоставки = @ДатаПоставки;
+
+    UPDATE Шины
+    SET ЦенаЗаединицу = ЦенаЗаединицу * (1 + @Наценка)
+    WHERE id IN (SELECT КодШины FROM Поставки WHERE ДатаПоставки = @ДатаПоставки);
+END;
+
+
+--2)
+CREATE PROCEDURE РасчетСуммыНаценкиПоДате @ДатаПоставки DATE, @Наценка DECIMAL(10, 2) OUT
+AS
+BEGIN
+    SET @Наценка = 0;
+
+    IF DATENAME(WEEKDAY, @ДатаПоставки) IN ('Saturday', 'Sunday')
+        SET @Наценка = 0.035;
+
+    SELECT SUM(Количество * (1 + @Наценка) - Количество * 1) AS СуммаНаценки
+    FROM Поставки
+    WHERE ДатаПоставки = @ДатаПоставки;
+END;
+
+DECLARE @Наценка DECIMAL(10, 2);
+EXEC РасчетСуммыНаценкиПоДате '2023-04-25', @Наценка OUT;
+SELECT @Наценка AS СуммаНаценки;
+
+
+--3)
+CREATE PROCEDURE ПроверкаКоличестваНаСкладе
+AS
+BEGIN
+    DECLARE @КодШины INT;
+    
+    DECLARE cursor_Шины CURSOR FOR
+    SELECT id FROM Шины;
+    
+    OPEN cursor_Шины;
+    
+    FETCH NEXT FROM cursor_Шины INTO @КодШины;
+    
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        DECLARE @Количество INT;
+        
+        SELECT @Количество = Количество FROM Поставки WHERE КодШины = @КодШины;
+        IF (@Количество < 16)
+        BEGIN
+            PRINT 'Необходимо заказать повторно шину с кодом: ' + CAST(@КодШины AS NVARCHAR(10));
+        END
+        
+        FETCH NEXT FROM cursor_Шины INTO @КодШины;
+    END
+    
+    CLOSE cursor_Шины;
+    DEALLOCATE cursor_Шины;
+END;
+
+
+--4)
+CREATE PROCEDURE РасчетНаценкиПоНаиболееЧастоупотребляемойШине
+AS
+BEGIN
+    DECLARE @Наценка DECIMAL(10, 2);
+
+    IF DAY(GETDATE()) IN (30, 31) AND EXISTS (
+        SELECT TOP 1 КодШины, SUM(Количество) AS ОбщееКоличество 
+        FROM Продажи 
+        WHERE MONTH(ДатаПродажи) = MONTH(GETDATE())
+        GROUP BY КодШины 
+        ORDER BY ОбщееКоличество DESC)
+        SET @Наценка = 0.13;
+    ELSE
+        SET @Наценка = 0;
+
+    UPDATE Продажи
+    SET Количество = Количество * (1 + @Наценка)
+    WHERE DAY(ДатаПродажи) IN (30, 31) AND MONTH(ДатаПродажи) = MONTH(GETDATE());
+
+    UPDATE Шины
+    SET ЦенаЗаединицу = ЦенаЗаединицу * (1 + @Наценка)
+    WHERE id = (
+        SELECT TOP 1 КодШины 
+        FROM Продажи 
+        WHERE MONTH(ДатаПродажи) = MONTH(GETDATE())
+        GROUP BY КодШины 
+        ORDER BY SUM(Количество) DESC);
+END;
+
+
+
+--5)
+CREATE PROCEDURE ОтчетПоКварталам
+AS
+BEGIN
+    DECLARE @ПервыйДень datetime, @ПоследнийДень datetime;
+    SET @ПервыйДень = DATEADD(qq, DATEDIFF(qq, 0, GETDATE()), 0);
+    SET @ПоследнийДень = DATEADD(dd, -1, DATEADD(qq, DATEDIFF(qq, 0, GETDATE()) + 1, 0))
+
+    SELECT Шины.Название AS Наименование,
+           SUM(Продажи.Количество) AS КоличествоПродаж,
+           SUM(Поставки.Количество) AS КоличествоПоставок,
+           SUM(Поставки.Количество) - SUM(Продажи.Количество) AS Остаток
+    FROM Шины
+    LEFT JOIN Поставки ON Шины.id = Поставки.КодШины AND Поставки.ДатаПоставки >= @ПервыйДень AND Поставки.ДатаПоставки <= @ПоследнийДень
+    LEFT JOIN Продажи ON Шины.id = Продажи.КодШины AND Продажи.ДатаПродажи >= @ПервыйДень AND Продажи.ДатаПродажи <= @ПоследнийДень
+    GROUP BY Шины.id, Шины.Название;
+END;
